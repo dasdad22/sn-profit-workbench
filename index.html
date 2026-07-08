@@ -129,6 +129,11 @@
       white-space: nowrap;
     }
 
+    .sync-pill.cloud {
+      color: #0c6b4d;
+      background: rgba(18, 184, 134, 0.14);
+    }
+
     .hero-metric {
       padding: 20px;
       border: 1px solid rgba(255, 255, 255, 0.72);
@@ -576,6 +581,27 @@
       line-height: 1.55;
     }
 
+    .cloud-grid {
+      display: grid;
+      gap: 9px;
+    }
+
+    .cloud-grid input {
+      min-height: 44px;
+      border: 1px solid var(--hairline);
+      border-radius: 16px;
+      outline: 0;
+      padding: 0 13px;
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.7);
+    }
+
+    .cloud-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 9px;
+    }
+
     .brand-grid {
       display: grid;
       grid-template-columns: repeat(2, 1fr);
@@ -784,6 +810,19 @@
         <section class="panel" id="tab-tools">
           <div class="tools">
             <article class="glass tool-card">
+              <h2>云端同步</h2>
+              <p id="cloudStatus">当前为本地模式。配置 Supabase 后可登录并云端保存。</p>
+              <div class="cloud-grid">
+                <input id="cloudEmail" type="email" autocomplete="email" placeholder="邮箱" />
+                <input id="cloudPassword" type="password" autocomplete="current-password" placeholder="密码" />
+                <div class="cloud-actions">
+                  <button class="tool-btn" id="cloudLogin" type="button">登录</button>
+                  <button class="tool-btn" id="cloudSignup" type="button">注册</button>
+                </div>
+                <button class="tool-btn" id="cloudLogout" type="button">退出云端</button>
+              </div>
+            </article>
+            <article class="glass tool-card">
               <h2>激活 / 保修查询</h2>
               <p>当前先放华为入口，后面可以继续补苹果、小米、荣耀、OPPO、vivo 等品牌。</p>
               <a class="link-btn" href="https://consumer.huawei.com/cn/support/warranty-query" target="_blank" rel="noopener">打开华为查询</a>
@@ -813,6 +852,11 @@
 
   <script>
     const STORAGE_KEY = "sn-profit-records-v1";
+    const CLOUD_SESSION_KEY = "sn-profit-cloud-session-v1";
+    const CLOUD_CONFIG = {
+      supabaseUrl: "",
+      supabaseAnonKey: ""
+    };
     const money = new Intl.NumberFormat("zh-CN", {
       style: "currency",
       currency: "CNY",
@@ -870,7 +914,12 @@
     const hint = document.querySelector("#formHint");
     const snInput = document.querySelector("#sn");
     const imageInput = document.querySelector("#snImage");
+    const syncPill = document.querySelector(".sync-pill");
+    const cloudStatus = document.querySelector("#cloudStatus");
+    const cloudEmail = document.querySelector("#cloudEmail");
+    const cloudPassword = document.querySelector("#cloudPassword");
     let records = loadRecords();
+    let cloudSession = loadCloudSession();
 
     document.querySelector("#date").value = today;
 
@@ -889,7 +938,7 @@
       checkDuplicate();
     });
 
-    form.addEventListener("submit", (event) => {
+    form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const record = readForm();
       if (!record.sn || !record.name || (record.isSold && !record.salePrice)) {
@@ -903,13 +952,22 @@
         return;
       }
 
-      records.unshift(record);
-      saveRecords();
-      form.reset();
-      document.querySelector("#date").value = today;
-      showHint("已保存，利润和明细已更新。");
-      render();
-      switchTab("records");
+      try {
+        if (isCloudActive()) {
+          await cloudCreateRecord(record);
+          records = await cloudFetchRecords();
+        } else {
+          records.unshift(record);
+          saveRecords();
+        }
+        form.reset();
+        document.querySelector("#date").value = today;
+        showHint("已保存，利润和明细已更新。");
+        render();
+        switchTab("records");
+      } catch (error) {
+        showHint(`云端保存失败：${error.message}`, true);
+      }
     });
 
     searchInput.addEventListener("input", renderRecords);
@@ -945,18 +1003,31 @@
     });
 
     document.querySelector("#resetDemo").addEventListener("click", () => {
+      if (isCloudActive()) {
+        cloudStatus.textContent = "云端模式下不批量覆盖数据，避免误删正式记录。";
+        return;
+      }
         records = createDemoRecords();
         saveRecords();
         render();
       });
 
-    recordList.addEventListener("click", (event) => {
+    recordList.addEventListener("click", async (event) => {
       const deleteButton = event.target.closest("[data-delete]");
       const copyButton = event.target.closest("[data-copy]");
       if (deleteButton) {
-        records = records.filter((item) => item.id !== deleteButton.dataset.delete);
-        saveRecords();
-        render();
+        try {
+          if (isCloudActive()) {
+            await cloudDeleteRecord(deleteButton.dataset.delete);
+            records = await cloudFetchRecords();
+          } else {
+            records = records.filter((item) => item.id !== deleteButton.dataset.delete);
+            saveRecords();
+          }
+          render();
+        } catch (error) {
+          showHint(`删除失败：${error.message}`, true);
+        }
       }
       if (copyButton) {
         const record = records.find((item) => item.id === copyButton.dataset.copy);
@@ -967,7 +1038,18 @@
       }
     });
 
+    document.querySelector("#cloudLogin").addEventListener("click", () => handleCloudLogin(false));
+    document.querySelector("#cloudSignup").addEventListener("click", () => handleCloudLogin(true));
+    document.querySelector("#cloudLogout").addEventListener("click", () => {
+      cloudSession = null;
+      localStorage.removeItem(CLOUD_SESSION_KEY);
+      records = loadRecords();
+      render();
+      updateCloudUi();
+    });
+
     render();
+    initCloud();
 
     function loadRecords() {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -981,6 +1063,204 @@
 
     function saveRecords() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+    }
+
+    function isCloudConfigured() {
+      return Boolean(CLOUD_CONFIG.supabaseUrl && CLOUD_CONFIG.supabaseAnonKey);
+    }
+
+    function isCloudActive() {
+      return isCloudConfigured() && Boolean(cloudSession?.access_token);
+    }
+
+    function loadCloudSession() {
+      const raw = localStorage.getItem(CLOUD_SESSION_KEY);
+      if (!raw) return null;
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    }
+
+    function saveCloudSession(session) {
+      cloudSession = session;
+      localStorage.setItem(CLOUD_SESSION_KEY, JSON.stringify(session));
+    }
+
+    function cloudUrl(path) {
+      return `${CLOUD_CONFIG.supabaseUrl.replace(/\/$/, "")}${path}`;
+    }
+
+    function cloudHeaders(useUserToken = true) {
+      return {
+        apikey: CLOUD_CONFIG.supabaseAnonKey,
+        Authorization: `Bearer ${useUserToken && cloudSession?.access_token ? cloudSession.access_token : CLOUD_CONFIG.supabaseAnonKey}`,
+        "Content-Type": "application/json"
+      };
+    }
+
+    async function cloudRequest(path, options = {}) {
+      const response = await fetch(cloudUrl(path), {
+        ...options,
+        headers: {
+          ...cloudHeaders(options.useUserToken !== false),
+          ...(options.headers || {})
+        }
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || `HTTP ${response.status}`);
+      }
+
+      if (response.status === 204) return null;
+      const text = await response.text();
+      return text ? JSON.parse(text) : null;
+    }
+
+    async function handleCloudLogin(isSignup) {
+      if (!isCloudConfigured()) {
+        cloudStatus.textContent = "还没有配置 Supabase URL 和 anon key，当前只能本地使用。";
+        return;
+      }
+
+      const email = cloudEmail.value.trim();
+      const password = cloudPassword.value;
+      if (!email || !password) {
+        cloudStatus.textContent = "请输入邮箱和密码。";
+        return;
+      }
+
+      try {
+        const session = isSignup
+          ? await cloudSignup(email, password)
+          : await cloudSignin(email, password);
+        saveCloudSession(session);
+        records = await cloudFetchRecords();
+        render();
+        updateCloudUi();
+        cloudStatus.textContent = isSignup ? "注册成功，已进入云端模式。" : "登录成功，已进入云端模式。";
+      } catch (error) {
+        cloudStatus.textContent = `云端登录失败：${error.message}`;
+      }
+    }
+
+    async function cloudSignup(email, password) {
+      const data = await cloudRequest("/auth/v1/signup", {
+        method: "POST",
+        useUserToken: false,
+        body: JSON.stringify({ email, password })
+      });
+      if (!data.access_token) {
+        return cloudSignin(email, password);
+      }
+      return data;
+    }
+
+    async function cloudSignin(email, password) {
+      return cloudRequest("/auth/v1/token?grant_type=password", {
+        method: "POST",
+        useUserToken: false,
+        body: JSON.stringify({ email, password })
+      });
+    }
+
+    async function initCloud() {
+      updateCloudUi();
+      if (!isCloudActive()) return;
+
+      try {
+        records = await cloudFetchRecords();
+        render();
+        updateCloudUi();
+      } catch (error) {
+        cloudStatus.textContent = `云端同步失败：${error.message}`;
+      }
+    }
+
+    function updateCloudUi() {
+      if (!isCloudConfigured()) {
+        syncPill.textContent = "本地草稿";
+        syncPill.classList.remove("cloud");
+        cloudStatus.textContent = "当前为本地模式。配置 Supabase 后可登录并云端保存。";
+        return;
+      }
+
+      if (isCloudActive()) {
+        syncPill.textContent = "云端同步";
+        syncPill.classList.add("cloud");
+        cloudStatus.textContent = "已登录云端，新增和删除会同步到数据库。";
+        return;
+      }
+
+      syncPill.textContent = "待登录";
+      syncPill.classList.remove("cloud");
+      cloudStatus.textContent = "云端已配置，登录后开始同步。";
+    }
+
+    async function cloudFetchRecords() {
+      const rows = await cloudRequest("/rest/v1/sn_records?select=*&order=created_at.desc", {
+        method: "GET"
+      });
+      return rows.map(fromCloudRecord);
+    }
+
+    async function cloudCreateRecord(record) {
+      await cloudRequest("/rest/v1/sn_records", {
+        method: "POST",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify(toCloudRecord(record))
+      });
+    }
+
+    async function cloudDeleteRecord(id) {
+      await cloudRequest(`/rest/v1/sn_records?id=eq.${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        headers: { Prefer: "return=minimal" }
+      });
+    }
+
+    function toCloudRecord(record) {
+      return {
+        id: record.id,
+        sn: record.sn,
+        category: record.category,
+        brand: record.brand,
+        name: record.name,
+        model: record.model,
+        partner: record.partner,
+        buy_price: record.buyPrice,
+        gift: record.gift,
+        shipping: record.shipping,
+        other_cost: record.otherCost,
+        sale_price: record.salePrice,
+        is_sold: record.isSold,
+        order_date: record.date,
+        signed_at: record.signedAt || null,
+        dock_tracking: record.dockTracking
+      };
+    }
+
+    function fromCloudRecord(row) {
+      return {
+        id: row.id,
+        sn: row.sn,
+        category: row.category,
+        brand: row.brand,
+        name: row.name,
+        model: row.model || "",
+        partner: row.partner || "",
+        buyPrice: Number(row.buy_price || 0),
+        gift: Number(row.gift || 0),
+        shipping: Number(row.shipping || 0),
+        otherCost: Number(row.other_cost || 0),
+        salePrice: Number(row.sale_price || 0),
+        isSold: Boolean(row.is_sold),
+        date: row.order_date || today,
+        signedAt: row.signed_at ? localDateTimeValue(new Date(row.signed_at)) : "",
+        dockTracking: row.dock_tracking || ""
+      };
     }
 
     function readForm() {
