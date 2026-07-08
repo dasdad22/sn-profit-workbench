@@ -534,7 +534,7 @@
 
     .record-actions {
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: 1fr 0.72fr auto;
       gap: 8px;
       margin-top: 10px;
     }
@@ -600,6 +600,39 @@
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 9px;
+    }
+
+    .auth-panel {
+      display: none;
+      padding: 18px;
+      margin: 15px 0;
+    }
+
+    .auth-panel.active {
+      display: block;
+    }
+
+    .auth-panel h2 {
+      margin: 0 0 6px;
+      font-size: 21px;
+    }
+
+    .auth-panel p {
+      margin: 0 0 13px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .secondary {
+      width: 100%;
+      min-height: 42px;
+      margin-top: 9px;
+      border-radius: 999px;
+      color: #27445d;
+      background: rgba(255, 255, 255, 0.68);
+      font-size: 13px;
+      font-weight: 850;
     }
 
     .brand-grid {
@@ -690,6 +723,19 @@
           </div>
         </section>
 
+        <section class="glass auth-panel" id="authPanel">
+          <h2>登录后使用</h2>
+          <p>正式版会把每台机器记录保存到云端。你和朋友各自登录账号，数据不会混在一起。</p>
+          <div class="cloud-grid">
+            <input id="authEmail" type="email" autocomplete="email" placeholder="邮箱" />
+            <input id="authPassword" type="password" autocomplete="current-password" placeholder="密码" />
+            <div class="cloud-actions">
+              <button class="tool-btn" id="authLogin" type="button">登录</button>
+              <button class="tool-btn" id="authSignup" type="button">注册</button>
+            </div>
+          </div>
+        </section>
+
         <nav class="tabs" aria-label="页面切换">
           <button class="tab active" data-tab="add" type="button">录入</button>
           <button class="tab" data-tab="records" type="button">明细</button>
@@ -705,9 +751,11 @@
 
             <div class="scan-row">
               <button class="tool-btn" id="pasteSn" type="button">粘贴识别</button>
-              <button class="tool-btn" id="uploadSn" type="button">图片识别</button>
+              <button class="tool-btn" id="cameraSn" type="button">拍照识别</button>
             </div>
-            <input class="hidden" id="snImage" type="file" accept="image/*" capture="environment" />
+            <button class="secondary" id="albumSn" type="button">从相册识别</button>
+            <input class="hidden" id="snCameraImage" type="file" accept="image/*" capture="environment" />
+            <input class="hidden" id="snAlbumImage" type="file" accept="image/*" />
 
             <div class="form-grid">
               <div class="field">
@@ -788,7 +836,8 @@
               </div>
             </div>
             <p class="hint" id="formHint"></p>
-            <button class="primary" type="submit">保存这台机器</button>
+            <button class="primary" id="saveRecord" type="submit">保存这台机器</button>
+            <button class="secondary hidden" id="cancelEdit" type="button">取消编辑</button>
           </form>
         </section>
 
@@ -841,8 +890,9 @@
               <p>导出会生成 JSON 文件，后面正式版可以升级成 Excel 和多人云端同步。</p>
               <div class="scan-row">
                 <button class="tool-btn" id="exportData" type="button">导出数据</button>
-                <button class="tool-btn" id="resetDemo" type="button">恢复示例</button>
+                <button class="tool-btn" id="clearData" type="button">清空数据</button>
               </div>
+              <button class="secondary" id="resetDemo" type="button">填入示例数据</button>
             </article>
           </div>
         </section>
@@ -913,13 +963,20 @@
     const categoryFilter = document.querySelector("#categoryFilter");
     const hint = document.querySelector("#formHint");
     const snInput = document.querySelector("#sn");
-    const imageInput = document.querySelector("#snImage");
+    const cameraInput = document.querySelector("#snCameraImage");
+    const albumInput = document.querySelector("#snAlbumImage");
     const syncPill = document.querySelector(".sync-pill");
+    const authPanel = document.querySelector("#authPanel");
+    const authEmail = document.querySelector("#authEmail");
+    const authPassword = document.querySelector("#authPassword");
     const cloudStatus = document.querySelector("#cloudStatus");
     const cloudEmail = document.querySelector("#cloudEmail");
     const cloudPassword = document.querySelector("#cloudPassword");
+    const saveRecordButton = document.querySelector("#saveRecord");
+    const cancelEditButton = document.querySelector("#cancelEdit");
     let records = loadRecords();
     let cloudSession = loadCloudSession();
+    let editingId = "";
 
     document.querySelector("#date").value = today;
 
@@ -946,27 +1003,37 @@
         return;
       }
 
-      const duplicate = records.find((item) => item.sn === record.sn);
+      const duplicate = records.find((item) => item.sn === record.sn && item.id !== editingId);
       if (duplicate) {
         showHint(`这个 SN 已存在：${duplicate.name}`, true);
         return;
       }
 
       try {
+        record.id = editingId || record.id;
         if (isCloudActive()) {
-          await cloudCreateRecord(record);
+          if (editingId) {
+            await cloudUpdateRecord(record);
+          } else {
+            await cloudCreateRecord(record);
+          }
           records = await cloudFetchRecords();
         } else {
-          records.unshift(record);
+          if (editingId) {
+            records = records.map((item) => item.id === editingId ? record : item);
+          } else {
+            records.unshift(record);
+          }
           saveRecords();
         }
-        form.reset();
-        document.querySelector("#date").value = today;
-        showHint("已保存，利润和明细已更新。");
+        resetForm();
+        showHint(editingId ? "已更新这台机器。" : "已保存，利润和明细已更新。");
+        editingId = "";
+        updateEditUi();
         render();
         switchTab("records");
       } catch (error) {
-        showHint(`云端保存失败：${error.message}`, true);
+        showHint(`保存失败：${error.message}`, true);
       }
     });
 
@@ -989,8 +1056,10 @@
       }
     });
 
-    document.querySelector("#uploadSn").addEventListener("click", () => imageInput.click());
-    imageInput.addEventListener("change", scanImage);
+    document.querySelector("#cameraSn").addEventListener("click", () => cameraInput.click());
+    document.querySelector("#albumSn").addEventListener("click", () => albumInput.click());
+    cameraInput.addEventListener("change", scanImage);
+    albumInput.addEventListener("change", scanImage);
 
     document.querySelector("#exportData").addEventListener("click", () => {
       const blob = new Blob([JSON.stringify(records, null, 2)], { type: "application/json" });
@@ -1012,9 +1081,30 @@
         render();
       });
 
+    document.querySelector("#clearData").addEventListener("click", async () => {
+      const confirmed = prompt("清空后不可恢复。确认清空请输入：清空");
+      if (confirmed !== "清空") return;
+
+      try {
+        if (isCloudActive()) {
+          await cloudClearRecords();
+          records = [];
+        } else {
+          records = [];
+          saveRecords();
+        }
+        resetForm();
+        render();
+        cloudStatus.textContent = "数据已清空。";
+      } catch (error) {
+        cloudStatus.textContent = `清空失败：${error.message}`;
+      }
+    });
+
     recordList.addEventListener("click", async (event) => {
       const deleteButton = event.target.closest("[data-delete]");
       const copyButton = event.target.closest("[data-copy]");
+      const editButton = event.target.closest("[data-edit]");
       if (deleteButton) {
         try {
           if (isCloudActive()) {
@@ -1036,16 +1126,30 @@
           showHint(`已复制 SN：${record.sn}`);
         }
       }
+      if (editButton) {
+        const record = records.find((item) => item.id === editButton.dataset.edit);
+        if (record) startEdit(record);
+      }
     });
 
     document.querySelector("#cloudLogin").addEventListener("click", () => handleCloudLogin(false));
     document.querySelector("#cloudSignup").addEventListener("click", () => handleCloudLogin(true));
+    document.querySelector("#authLogin").addEventListener("click", () => handleCloudLogin(false, true));
+    document.querySelector("#authSignup").addEventListener("click", () => handleCloudLogin(true, true));
     document.querySelector("#cloudLogout").addEventListener("click", () => {
       cloudSession = null;
       localStorage.removeItem(CLOUD_SESSION_KEY);
       records = loadRecords();
+      resetForm();
       render();
       updateCloudUi();
+    });
+
+    cancelEditButton.addEventListener("click", () => {
+      editingId = "";
+      resetForm();
+      updateEditUi();
+      showHint("");
     });
 
     render();
@@ -1053,11 +1157,11 @@
 
     function loadRecords() {
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return createDemoRecords();
+      if (!raw) return [];
       try {
         return JSON.parse(raw);
       } catch {
-        return createDemoRecords();
+        return [];
       }
     }
 
@@ -1119,14 +1223,14 @@
       return text ? JSON.parse(text) : null;
     }
 
-    async function handleCloudLogin(isSignup) {
+    async function handleCloudLogin(isSignup, fromAuthPanel = false) {
       if (!isCloudConfigured()) {
         cloudStatus.textContent = "还没有配置 Supabase URL 和 anon key，当前只能本地使用。";
         return;
       }
 
-      const email = cloudEmail.value.trim();
-      const password = cloudPassword.value;
+      const email = (fromAuthPanel ? authEmail.value : cloudEmail.value).trim();
+      const password = fromAuthPanel ? authPassword.value : cloudPassword.value;
       if (!email || !password) {
         cloudStatus.textContent = "请输入邮箱和密码。";
         return;
@@ -1140,6 +1244,10 @@
         records = await cloudFetchRecords();
         render();
         updateCloudUi();
+        cloudEmail.value = email;
+        authEmail.value = email;
+        cloudPassword.value = "";
+        authPassword.value = "";
         cloudStatus.textContent = isSignup ? "注册成功，已进入云端模式。" : "登录成功，已进入云端模式。";
       } catch (error) {
         cloudStatus.textContent = `云端登录失败：${error.message}`;
@@ -1183,6 +1291,7 @@
       if (!isCloudConfigured()) {
         syncPill.textContent = "本地草稿";
         syncPill.classList.remove("cloud");
+        authPanel.classList.remove("active");
         cloudStatus.textContent = "当前为本地模式。配置 Supabase 后可登录并云端保存。";
         return;
       }
@@ -1190,12 +1299,14 @@
       if (isCloudActive()) {
         syncPill.textContent = "云端同步";
         syncPill.classList.add("cloud");
+        authPanel.classList.remove("active");
         cloudStatus.textContent = "已登录云端，新增和删除会同步到数据库。";
         return;
       }
 
       syncPill.textContent = "待登录";
       syncPill.classList.remove("cloud");
+      authPanel.classList.add("active");
       cloudStatus.textContent = "云端已配置，登录后开始同步。";
     }
 
@@ -1219,6 +1330,18 @@
         method: "DELETE",
         headers: { Prefer: "return=minimal" }
       });
+    }
+
+    async function cloudUpdateRecord(record) {
+      await cloudRequest(`/rest/v1/sn_records?id=eq.${encodeURIComponent(record.id)}`, {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify(toCloudRecord(record))
+      });
+    }
+
+    async function cloudClearRecords() {
+      await Promise.all(records.map((record) => cloudDeleteRecord(record.id)));
     }
 
     function toCloudRecord(record) {
@@ -1283,6 +1406,40 @@
         signedAt: data.signedAt || "",
         dockTracking: data.dockTracking.trim()
       };
+    }
+
+    function resetForm() {
+      form.reset();
+      document.querySelector("#date").value = today;
+      updateLiveProfit();
+    }
+
+    function startEdit(record) {
+      editingId = record.id;
+      snInput.value = record.sn;
+      document.querySelector("#category").value = record.category;
+      document.querySelector("#brand").value = record.brand;
+      document.querySelector("#name").value = record.name;
+      document.querySelector("#model").value = record.model;
+      document.querySelector("#partner").value = record.partner;
+      document.querySelector("#buyPrice").value = record.buyPrice || "";
+      document.querySelector("#gift").value = record.gift || "";
+      document.querySelector("#shipping").value = record.shipping || "";
+      document.querySelector("#otherCost").value = record.otherCost || "";
+      document.querySelector("#isSold").value = isSold(record) ? "yes" : "no";
+      document.querySelector("#salePrice").value = record.salePrice || "";
+      document.querySelector("#date").value = record.date || today;
+      document.querySelector("#signedAt").value = record.signedAt || "";
+      document.querySelector("#dockTracking").value = record.dockTracking || "";
+      updateEditUi();
+      updateLiveProfit();
+      switchTab("add");
+      showHint("正在编辑这台机器，保存后会覆盖原记录。");
+    }
+
+    function updateEditUi() {
+      saveRecordButton.textContent = editingId ? "保存修改" : "保存这台机器";
+      cancelEditButton.classList.toggle("hidden", !editingId);
     }
 
     function toNumber(value) {
@@ -1356,7 +1513,7 @@
       });
 
       if (!filtered.length) {
-        recordList.innerHTML = `<div class="glass empty">没有找到对应记录</div>`;
+        recordList.innerHTML = `<div class="glass empty">暂无记录，先去录入一台机器</div>`;
         return;
       }
 
@@ -1386,6 +1543,7 @@
             </div>
             <div class="record-actions">
               <button class="ghost" data-copy="${item.id}" type="button">复制 SN</button>
+              <button class="ghost" data-edit="${item.id}" type="button">编辑</button>
               <button class="delete" data-delete="${item.id}" type="button" aria-label="删除记录">x</button>
             </div>
           </article>
@@ -1456,13 +1614,14 @@
       showHint("SN 看起来可用。");
     }
 
-    async function scanImage() {
-      const file = imageInput.files?.[0];
+    async function scanImage(event) {
+      const input = event.currentTarget;
+      const file = input.files?.[0];
       if (!file) return;
 
       if (!("BarcodeDetector" in window)) {
         showHint("当前浏览器不支持图片条码识别，正式版可接入 OCR 服务。", true);
-        imageInput.value = "";
+        input.value = "";
         return;
       }
 
@@ -1481,7 +1640,7 @@
       } catch {
         showHint("这张图暂时没识别出来，可以先手动输入或粘贴。", true);
       } finally {
-        imageInput.value = "";
+        input.value = "";
       }
     }
 
